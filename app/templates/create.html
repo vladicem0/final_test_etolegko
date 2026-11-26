@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Создание кампании · Keitaro</title>
+  <link rel="stylesheet" href="/static/create.css">
+  <script src="/static/create.js" defer></script>
+</head>
+<body>
+  <header class="bar">
+    <div class="bar-inner">
+      <div class="brand"><strong>Keitaro</strong><span>Кампании</span></div>
+      <a href="/docs">Документация API</a>
+    </div>
+  </header>
+  <main>
+    <h1>Новая кампания</h1>
+    <div class="layout">
+      <form id="creator">
+        <fieldset id="inputs">
+          <legend>Параметры кампании</legend>
+          <label for="name">Название кампании</label>
+          <input id="name" type="text" placeholder="summer_launch" required maxlength="255" aria-describedby="prefix-hint">
+          <p id="prefix-hint" class="hint">Префикс <code>test_nitsevich_</code> добавляется автоматически.</p>
+          <label for="geo">Код страны</label>
+          <input id="geo" type="text" placeholder="AU" maxlength="2" pattern="[A-Za-z]{2}" required aria-describedby="geo-hint">
+          <p id="geo-hint" class="hint">Двухбуквенный код страны для первого потока.</p>
+          <label for="search">Поиск оффера</label>
+          <input id="search" type="search" placeholder="Введите ID или часть названия" autocomplete="off" aria-controls="offers">
+          <p id="search-status" class="hint" role="status"></p>
+          <label for="offers">Оффер для кампании</label>
+          <select id="offers" required aria-describedby="search-status">
+            <option value="">Сначала найдите оффер</option>
+          </select>
+        </fieldset>
+        <div class="actions">
+          <button id="submit" type="submit">Создать кампанию</button>
+          <button id="restart" type="button" class="secondary" hidden>Начать другую кампанию</button>
+        </div>
+        <p id="status" role="status" aria-live="polite" aria-atomic="true"></p>
+        <a id="campaign-link" hidden target="_blank" rel="noopener noreferrer">Открыть кампанию в Keitaro ↗</a>
+        <noscript>Для поиска офферов и создания кампании включите JavaScript.</noscript>
+      </form>
+      <aside aria-labelledby="preview-title">
+        <h2 id="preview-title">Потоки кампании</h2>
+        <ol>
+          <li><strong id="geo-preview">Выбранная страна</strong><span>Переход на Google</span></li>
+          <li><strong>Остальной трафик</strong><span id="offer-preview">На выбранный оффер · 100%</span></li>
+        </ol>
+      </aside>
+    </div>
+  </main>
+</body>
+</html>

@@ -14,3 +14,6 @@ class Settings(DatabaseSettings):
         "https://keitaro-for-tests.etolegko.com/admin_api/v1"
     )
     keitaro_api_key: SecretStr = Field(min_length=1)
+    keitaro_domain_id: int = Field(default=1813, gt=0)
+    keitaro_group_id: int = Field(default=10332, gt=0)
+    keitaro_traffic_source_id: int = Field(default=836, gt=0)
