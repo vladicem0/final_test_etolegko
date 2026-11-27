@@ -4,7 +4,7 @@ from uuid import UUID
 import pycountry
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
@@ -62,6 +62,10 @@ def conflict(reason: str) -> HTTPException:
     return HTTPException(409, reason)
 
 
+def imported_campaign_conflict(campaign_id: int) -> HTTPException:
+    return conflict(f"Кампания #{campaign_id} уже импортирована. Откройте её в списке кампаний.")
+
+
 def operation(engine: Engine, fields: CampaignInput, settings: Settings) -> Campaign:
     alias = "kt-" + fields.request_id.hex
     with Session(engine, expire_on_commit=False) as db, db.begin():
@@ -71,6 +75,13 @@ def operation(engine: Engine, fields: CampaignInput, settings: Settings) -> Camp
             traffic_source_id=settings.keitaro_traffic_source_id, creation_state="new",
         ).on_conflict_do_nothing(index_elements=["alias"]))
         row = db.scalars(select(Campaign).where(Campaign.alias == alias)).one()
+        if row.keitaro_id is None:
+            imported_id = db.scalar(select(Campaign.keitaro_id).where(
+                Campaign.snapshot_alias == alias, Campaign.creation_state == "imported",
+            ))
+            if imported_id is not None:
+                # Rolling back this reservation leaves the imported snapshot available to Fetch.
+                raise imported_campaign_conflict(imported_id)
         if (row.name, row.geo_code, row.offer_id) != (fields.name, fields.geo_code, fields.offer_id):
             raise conflict("Этот идентификатор операции уже связан с другими параметрами.")
         return row
@@ -168,8 +179,8 @@ async def send_step(
     try:
         return await post(payload)
     except CatalogError as exc:
-        # A definite rejection can be corrected and retried. A lost response cannot.
-        if exc.upstream_status in (400, 401, 403, 404, 406, 422):
+        # An unsent or explicitly rejected write can be retried on the next submission.
+        if exc.request_not_sent or exc.upstream_status in (400, 401, 403, 404, 406, 422):
             checkpoint(engine, row, previous)
         raise
 
@@ -181,6 +192,18 @@ async def resolve_campaign(client: KeitaroClient, engine: Engine, row: Campaign)
             raise conflict("Найдено несколько кампаний с alias этой операции.")
         if matches:
             remote = await client.campaign(matches[0]["id"])
+            # The tracker alias may have changed since the last local Fetch.
+            with engine.begin() as connection:
+                other_id = connection.scalar(select(Campaign.id).where(
+                    Campaign.keitaro_id == remote["id"], Campaign.id != row.id,
+                ))
+                if other_id is not None:
+                    # Discard only an unused reservation. A previously sent POST still needs reconciliation.
+                    connection.execute(delete(Campaign).where(
+                        Campaign.id == row.id, Campaign.creation_state == "new", Campaign.keitaro_id.is_(None),
+                    ))
+            if other_id is not None:
+                raise imported_campaign_conflict(remote["id"])
             verify_campaign(remote, row)
         elif row.creation_state == "new":
             remote = await send_step(
@@ -232,9 +255,8 @@ async def complete_operation(
             checkpoint(engine, row, after)
 
     verify_campaign(await client.campaign(row.keitaro_id), row)
-    host = str(settings.keitaro_base_url).split("/admin_api/", 1)[0].rstrip("/")
     return CampaignResult(
         campaign_id=row.keitaro_id, alias=row.alias, name=row.name, geo_code=row.geo_code,
         offer_id=row.offer_id, streams=[StreamResult.model_validate(s) for s in streams],
-        admin_url=f"{host}/admin/#!/campaign.editor/{row.keitaro_id}",
+        admin_url=settings.campaign_admin_url(row.keitaro_id),
     )

@@ -28,11 +28,13 @@ _records = TypeAdapter(list[Record])
 
 class CatalogError(Exception):
     def __init__(
-        self, message: str, status_code: int = 502, *, upstream_status: int | None = None
+        self, message: str, status_code: int = 502, *,
+        upstream_status: int | None = None, request_not_sent: bool = False,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.upstream_status = upstream_status
+        self.request_not_sent = request_not_sent
 
 
 class KeitaroClient:
@@ -47,12 +49,17 @@ class KeitaroClient:
             response = await self.http.request(method, path, params=params, json=payload)
             response.raise_for_status()
         except httpx.TimeoutException as exc:
-            raise CatalogError("Keitaro did not respond in time.", 504) from exc
+            raise CatalogError(
+                "Keitaro did not respond in time.", 504,
+                request_not_sent=isinstance(exc, (httpx.PoolTimeout, httpx.ConnectTimeout)),
+            ) from exc
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
             raise CatalogError(f"Keitaro returned HTTP {status}.", upstream_status=status) from exc
         except httpx.RequestError as exc:
-            raise CatalogError("Could not reach the Keitaro API.") from exc
+            raise CatalogError(
+                "Could not reach the Keitaro API.", request_not_sent=isinstance(exc, httpx.ConnectError)
+            ) from exc
 
         try:
             return adapter.validate_json(response.content)
@@ -86,6 +93,9 @@ class KeitaroClient:
         if offer.id != offer_id:
             raise CatalogError("Keitaro returned a different offer.")
         return offer
+
+    async def list_campaigns(self, offset: int, limit: int) -> list[CatalogItem]:
+        return await self._request("GET", "campaigns", _catalog, params={"offset": offset, "limit": limit})
 
     async def campaigns_by_alias(self, alias: str) -> list[dict]:
         matches = []

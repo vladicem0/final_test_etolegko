@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Annotated
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Path as PathParam, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -12,6 +12,7 @@ from sqlalchemy import create_engine, select
 
 from app.config import Settings
 from app.creation import CampaignInput, CampaignResult, create_campaign
+from app.importer import fetch_campaign, local_campaign
 from app.keitaro import CatalogError, CatalogItem, KeitaroClient
 from app.models import Campaign
 
@@ -47,6 +48,11 @@ async def creator_form(request: Request):
     return templates.TemplateResponse(request=request, name="create.html")
 
 
+@app.get("/campaigns", response_class=HTMLResponse)
+async def campaign_browser(request: Request):
+    return templates.TemplateResponse(request=request, name="import.html")
+
+
 def get_keitaro(request: Request) -> KeitaroClient:
     return request.app.state.keitaro
 
@@ -79,14 +85,40 @@ async def offers(client: Client, q: str = "") -> list[CatalogItem]:
     return await client.offers(q)
 
 
-@app.post("/api/campaigns", response_model=CampaignResult)
-async def submit_campaign(request: Request, fields: CampaignInput, client: Client) -> CampaignResult:
-    # This local operator interface can use an upstream credential to write.
+def require_local_write(request: Request) -> None:
+    # Writes belong to the local operator, including updates to the SQLite snapshot.
     if request.url.hostname not in {"localhost", "127.0.0.1", "::1"}:
-        raise HTTPException(403, "Создание доступно только через локальный адрес приложения.")
+        raise HTTPException(403, "Операция доступна только через локальный адрес приложения.")
     origin = request.headers.get("origin")
     if origin and origin != f"{request.url.scheme}://{request.url.netloc}":
         raise HTTPException(403, "Запрос должен прийти со страницы приложения.")
     if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
         raise HTTPException(415, "Требуется application/json.")
+
+
+@app.post("/api/campaigns", response_model=CampaignResult, dependencies=[Depends(require_local_write)])
+async def submit_campaign(request: Request, fields: CampaignInput, client: Client) -> CampaignResult:
     return await create_campaign(client, request.app.state.engine, request.app.state.settings, fields)
+
+
+CampaignId = Annotated[int, PathParam(gt=0, le=2**63 - 1)]
+
+
+@app.get("/api/campaigns")
+async def campaigns(
+    client: Client, offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+) -> list[CatalogItem]:
+    return await client.list_campaigns(offset, limit)
+
+
+@app.get("/api/campaigns/{campaign_id}/streams")
+def saved_streams(request: Request, campaign_id: CampaignId) -> dict:
+    snapshot = local_campaign(request.app.state.engine, campaign_id)
+    return {**snapshot, "admin_url": request.app.state.settings.campaign_admin_url(campaign_id)}
+
+
+@app.post("/api/campaigns/{campaign_id}/fetch", dependencies=[Depends(require_local_write)])
+async def fetch_streams(request: Request, campaign_id: CampaignId, client: Client) -> dict:
+    snapshot = await fetch_campaign(client, request.app.state.engine, campaign_id)
+    return {**snapshot, "admin_url": request.app.state.settings.campaign_admin_url(campaign_id)}
