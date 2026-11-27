@@ -37,8 +37,18 @@
     </section>
     <section class="panel" id="snapshot" aria-labelledby="snapshot-title" hidden>
       <h2 id="snapshot-title"></h2>
-      <div id="streams"></div>
+      <fieldset id="streams" aria-labelledby="snapshot-title"></fieldset>
     </section>
+    <dialog id="discard-dialog" aria-labelledby="discard-title" aria-describedby="discard-info">
+      <form method="dialog">
+        <h2 id="discard-title">Загрузить потоки заново?</h2>
+        <p id="discard-info"></p>
+        <div class="actions">
+          <button class="secondary" value="keep" autofocus>Оставить черновики</button>
+          <button value="discard">Отбросить и загрузить</button>
+        </div>
+      </form>
+    </dialog>
   </main>
 </body>
 </html>

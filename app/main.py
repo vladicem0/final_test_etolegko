@@ -1,17 +1,20 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Path as PathParam, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import create_engine, select
 
 from app.config import Settings
 from app.creation import CampaignInput, CampaignResult, create_campaign
+from app.drafts import edit_draft
 from app.importer import fetch_campaign, local_campaign
 from app.keitaro import CatalogError, CatalogItem, KeitaroClient
 from app.models import Campaign
@@ -118,7 +121,50 @@ def saved_streams(request: Request, campaign_id: CampaignId) -> dict:
     return {**snapshot, "admin_url": request.app.state.settings.campaign_admin_url(campaign_id)}
 
 
+Revision = Annotated[int, Field(strict=True, ge=0, le=2**63 - 1)]
+PositiveId = Annotated[int, Field(gt=0, le=2**63 - 1)]
+
+
+class FetchInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    discard_drafts: dict[PositiveId, Revision] | None = None
+
+
 @app.post("/api/campaigns/{campaign_id}/fetch", dependencies=[Depends(require_local_write)])
-async def fetch_streams(request: Request, campaign_id: CampaignId, client: Client) -> dict:
-    snapshot = await fetch_campaign(client, request.app.state.engine, campaign_id)
+async def fetch_streams(
+    request: Request, campaign_id: CampaignId, client: Client, fields: FetchInput | None = None,
+) -> dict:
+    snapshot = await fetch_campaign(
+        client, request.app.state.engine, campaign_id, fields.discard_drafts if fields else None,
+    )
+    return {**snapshot, "admin_url": request.app.state.settings.campaign_admin_url(campaign_id)}
+
+
+class DraftAction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["add", "remove", "restore", "pin", "unpin", "cancel"]
+    expected_revision: Revision
+    offer_id: Annotated[int, Field(strict=True, gt=0, le=2**63 - 1)] | None = None
+    share: Annotated[int, Field(strict=True, ge=1, le=100)] | None = None
+
+    @model_validator(mode="after")
+    def check_action_fields(self):
+        if (self.action == "cancel") != (self.offer_id is None):
+            raise ValueError("Supply an offer ID for offer actions only.")
+        if self.share is not None and self.action != "pin":
+            raise ValueError("Only pin accepts an explicit share.")
+        return self
+
+
+@app.post("/api/campaigns/{campaign_id}/streams/{stream_id}/draft", dependencies=[Depends(require_local_write)])
+async def update_draft(
+    request: Request, campaign_id: CampaignId, stream_id: CampaignId, fields: DraftAction, client: Client,
+) -> dict:
+    catalog_item = await client.offer(fields.offer_id) if fields.action == "add" else None
+    engine = request.app.state.engine
+    await run_in_threadpool(
+        edit_draft, engine, campaign_id, stream_id, action=fields.action, offer_id=fields.offer_id,
+        expected_revision=fields.expected_revision, share=fields.share, catalog_item=catalog_item,
+    )
+    snapshot = await run_in_threadpool(local_campaign, engine, campaign_id)
     return {**snapshot, "admin_url": request.app.state.settings.campaign_admin_url(campaign_id)}

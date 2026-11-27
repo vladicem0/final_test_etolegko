@@ -1,4 +1,4 @@
-from sqlalchemy import ForeignKey, String, text
+from sqlalchemy import JSON, ForeignKey, String, false, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -35,6 +35,9 @@ class Stream(Base):
     type: Mapped[str] = mapped_column(String(32))
     schema: Mapped[str] = mapped_column(String(32))
     present: Mapped[bool]
+    edit_revision: Mapped[int] = mapped_column(server_default=text("0"))
+    draft_base: Mapped[list[dict] | None] = mapped_column(JSON(none_as_null=True))
+    draft_add_origin: Mapped[list[list[int]] | None] = mapped_column(JSON(none_as_null=True))
 
 
 class Offer(Base):
@@ -53,3 +56,16 @@ class StreamOffer(Base):
     share: Mapped[int]
     state: Mapped[str] = mapped_column(String(32))
     removed: Mapped[bool]
+    pinned: Mapped[bool] = mapped_column(server_default=false())
+
+
+class StreamOfferDraft(Base):
+    __tablename__ = "stream_offer_drafts"
+
+    stream_id: Mapped[int] = mapped_column(ForeignKey("streams.id"), primary_key=True)
+    offer_id: Mapped[int] = mapped_column(ForeignKey("offers.id"), primary_key=True)
+    position: Mapped[int]
+    share: Mapped[int]
+    state: Mapped[str] = mapped_column(String(32))
+    removed: Mapped[bool]
+    pinned: Mapped[bool]

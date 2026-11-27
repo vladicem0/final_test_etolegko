@@ -8,6 +8,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from app.drafts import clear_drafts, overlay_drafts
 from app.keitaro import CatalogError, KeitaroClient
 from app.models import Campaign, Offer, Stream, StreamOffer
 
@@ -54,7 +55,7 @@ class RemoteStream(RemoteRecord):
 
 
 def _snapshot(db: Session, campaign_id: int) -> dict:
-    # One SELECT also gives the reader a consistent view on SQLite.
+    # Load the published rows first, then overlay each stream's saved draft in the same transaction.
     query = (
         select(Campaign, Stream, StreamOffer, Offer.name)
         .outerjoin(Stream, and_(Stream.campaign_id == Campaign.id, Stream.present.is_(True)))
@@ -74,19 +75,22 @@ def _snapshot(db: Session, campaign_id: int) -> dict:
             streams[stream.id] = {
                 "id": stream.id, "name": stream.name, "position": stream.position,
                 "type": stream.type, "schema": stream.schema, "offers": [],
+                "editable": stream.schema == "landings" and campaign.creation_state in ("ready", "imported"),
+                "has_draft": stream.draft_base is not None, "revision": stream.edit_revision,
             }
         if binding is not None:
             streams[stream.id]["offers"].append({
                 "offer_id": binding.offer_id, "name": offer_name, "share": binding.share,
-                "state": binding.state, "removed": binding.removed,
+                "state": binding.state, "removed": binding.removed, "pinned": binding.pinned,
             })
     if result is None:
         raise HTTPException(404, "Локального снимка кампании ещё нет. Нажмите Fetch.")
-    return {**result, "streams": list(streams.values())}
+    return overlay_drafts(db, {**result, "streams": list(streams.values())})
 
 
 def local_campaign(engine: Engine, campaign_id: int) -> dict:
     with Session(engine) as db:
+        db.connection().exec_driver_sql("BEGIN")
         return _snapshot(db, campaign_id)
 
 
@@ -131,24 +135,49 @@ def _update_offers(db: Session, offer_ids: set[int], names: dict[int, str]) -> N
     db.flush()
 
 
-def _update_bindings(db: Session, stream: RemoteStream, previous: dict[int, StreamOffer]) -> None:
+def _update_bindings(db: Session, stream: RemoteStream, previous: dict[int, StreamOffer]) -> bool:
+    changed = False
     for position, published in enumerate(stream.offers):
         binding = previous.pop(published.offer_id, None)
         if binding is None:
             binding = StreamOffer(stream_id=stream.id, offer_id=published.offer_id)
             db.add(binding)
+            changed = True
+        elif (binding.position, binding.share, binding.state, binding.removed) != (
+            position, published.share, published.state, False,
+        ):
+            changed = True
         binding.position = position
         binding.share = published.share
         binding.state = published.state
         binding.removed = False
     for missing in previous.values():
-        missing.share = 0
-        missing.removed = True
+        if not missing.removed:
+            changed = True
+            missing.share = 0
+            missing.removed = True
+            missing.pinned = False
+    return changed
 
 
-async def fetch_campaign(client: KeitaroClient, engine: Engine, campaign_id: int) -> dict:
+def _check_discard(db: Session, campaign_id: int, confirmed: dict[int, int] | None) -> None:
+    # Consent applies to exactly the drafts and revisions the operator saw.
+    drafts = dict(db.execute(
+        select(Stream.id, Stream.edit_revision).join(Campaign)
+        .where(Campaign.keitaro_id == campaign_id, Stream.draft_base.is_not(None))
+    ).tuples().all())
+    if drafts != (confirmed or {}):
+        raise HTTPException(409, "Состав черновиков изменился или их сброс не подтверждён. "
+                                 "Откройте сохранённые потоки и выберите, оставить ли правки.")
+
+
+async def fetch_campaign(
+    client: KeitaroClient, engine: Engine, campaign_id: int, discard_drafts: dict[int, int] | None = None,
+) -> dict:
     with Session(engine) as db:
+        db.connection().exec_driver_sql("BEGIN")
         revision = db.scalar(select(Campaign.snapshot_revision).where(Campaign.keitaro_id == campaign_id)) or 0
+        _check_discard(db, campaign_id, discard_drafts)
     remote, streams, offer_ids, names = await _read_remote(client, campaign_id)
     with Session(engine) as db, db.begin():
         # Take SQLite's write lock only after the upstream reads have completed.
@@ -156,6 +185,9 @@ async def fetch_campaign(client: KeitaroClient, engine: Engine, campaign_id: int
         row = db.scalar(select(Campaign).where(Campaign.keitaro_id == remote.id))
         if (row.snapshot_revision if row else 0) != revision:
             raise HTTPException(409, "Снимок уже обновлён другим запросом. Повторите Fetch.")
+        _check_discard(db, campaign_id, discard_drafts)
+        if discard_drafts:
+            clear_drafts(db, list(discard_drafts))
         pending_creator = db.scalar(select(Campaign.id).where(
             Campaign.alias == remote.alias, Campaign.keitaro_id.is_(None),
         ))
@@ -187,16 +219,20 @@ async def fetch_campaign(client: KeitaroClient, engine: Engine, campaign_id: int
         for stream in streams:
             local = known_streams.pop(stream.id, None)
             if local is None:
-                local = Stream(id=stream.id, campaign_id=row.id)
+                local = Stream(id=stream.id, campaign_id=row.id, edit_revision=0)
                 db.add(local)
+            elif not local.present or local.schema != stream.flow_schema:
+                local.edit_revision += 1
             local.name = stream.name
             local.position = stream.position
             local.type = stream.type
             local.schema = stream.flow_schema
             local.present = True
+            db.flush()
+            if _update_bindings(db, stream, bindings.get(stream.id, {})):
+                local.edit_revision += 1
         for missing in known_streams.values():
-            missing.present = False
-        db.flush()
-        for stream in streams:
-            _update_bindings(db, stream, bindings.get(stream.id, {}))
+            if missing.present:
+                missing.edit_revision += 1
+                missing.present = False
         return _snapshot(db, campaign_id)
