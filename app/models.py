@@ -15,4 +15,7 @@ class Campaign(Base):
     alias: Mapped[str] = mapped_column(String(255), unique=True)
     geo_code: Mapped[str | None] = mapped_column(String(2))
     offer_id: Mapped[int | None]
+    domain_id: Mapped[int | None]
+    group_id: Mapped[int | None]
+    traffic_source_id: Mapped[int | None]
     creation_state: Mapped[str] = mapped_column(String(32))
