@@ -132,6 +132,55 @@ class DraftTests(unittest.TestCase):
             self.assertEqual([row["offer_id"] for row in db.get(Stream, 711).draft_base], [18001, 18003])
         self.assertEqual(self.edit("cancel")["offers"], archived["offers"])
 
+    def test_redundant_unpin_keeps_revision_and_add_undo(self):
+        added = self.edit("add", 18004)
+        rejected = self.post_action("unpin", 18001, revision=added["revision"])
+        self.assertEqual(rejected.status_code, 409, rejected.text)
+        self.assertEqual(stream(self.snapshot()), added)
+        undone = self.edit("remove", 18004, revision=added["revision"])
+        self.assertFalse(undone["has_draft"])
+        self.assertEqual(undone["offers"], stream(self.initial)["offers"])
+
+    def test_remove_disabled_preserves_active_weights_until_brought_back(self):
+        self.remote_offers.append(binding(34, 18004, 9, "disabled"))
+        published = stream(self.fetch())
+        removed = self.edit("remove", 18004)
+        self.assertEqual(active_shares(removed), active_shares(published))
+        archived = next(row for row in removed["offers"] if row["offer_id"] == 18004)
+        self.assertEqual((archived["removed"], archived["share"]), (True, 0))
+        restored = self.edit("restore", 18004)
+        self.assertEqual(active_shares(restored), [(18001, 25), (18002, 25), (18003, 25), (18004, 25)])
+        self.assertFalse(restored["offers"][-1]["pinned"])
+        self.assertEqual(self.edit("cancel")["offers"], published["offers"])
+
+    def test_removing_disabled_offer_preserves_undo_of_temporary_addition(self):
+        self.stand.offers.append({"id": 18005, "name": "Fifth"})
+        self.remote_offers.append(binding(34, 18004, 9, "disabled"))
+        published = stream(self.fetch())
+        self.edit("add", 18005)
+        self.edit("remove", 18004)
+        undone = self.edit("remove", 18005)
+        self.assertTrue(undone["has_draft"])
+        expected = [row if row["offer_id"] != 18004 else dict(row, removed=True, share=0)
+                    for row in published["offers"]]
+        self.assertEqual(undone["offers"], expected)
+
+    def test_all_disabled_offers_can_be_removed_and_cancelled(self):
+        for row in self.remote_offers:
+            row["state"] = "disabled"
+        published = stream(self.fetch())
+        for row in published["offers"]:
+            removed = self.edit("remove", row["offer_id"])
+        self.assertTrue(removed["has_draft"])
+        self.assertEqual([(row["offer_id"], row["share"], row["removed"]) for row in removed["offers"]],
+                         [(18001, 0, True), (18002, 0, True), (18003, 0, True)])
+        self.assertEqual(self.edit("cancel")["offers"], published["offers"])
+
+    def test_pin_at_current_share_rebalances_other_active_offers(self):
+        pinned = self.edit("pin", 18001)
+        self.assertTrue(pinned["offers"][0]["pinned"])
+        self.assertEqual(active_shares(pinned), [(18001, 12), (18002, 44), (18003, 44)])
+
     def test_pin_unpin_and_disabled_offer(self):
         self.remote_offers[1]["state"] = "disabled"
         self.fetch()

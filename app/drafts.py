@@ -94,9 +94,13 @@ def _edit_rows(
                 origin = stream.draft_add_origin
                 if origin is not None and [r.offer_id for r in rows] == [item[0] for item in origin]:
                     for restored, (_, original_share) in zip(rows, origin):
-                        restored.share = original_share
+                        if not restored.removed and restored.state == "active":
+                            restored.share = original_share
                     stream.draft_add_origin = None
                     return
+            if row.state == "disabled":
+                # Archiving a disabled binding leaves the active allocation and its undo data intact.
+                return
         elif action == "restore" and row.removed:
             row.removed, row.pinned, row.state = False, False, "active"
         elif action in ("pin", "unpin") and row.state == "active" and not row.removed:
@@ -106,6 +110,8 @@ def _edit_rows(
                     raise HTTPException(422, "Закреплённая доля должна быть целым числом от 1 до 100.")
                 row.share, row.pinned = value, True
             else:
+                if not row.pinned:
+                    raise HTTPException(409, "У этого оффера нет закреплённой доли.")
                 row.pinned = False
         else:
             raise HTTPException(409, "Это действие недоступно для текущего состояния оффера.")
