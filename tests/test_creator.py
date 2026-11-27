@@ -25,6 +25,7 @@ class FakeKeitaro:
         self.streams = {}
         self.reads = []
         self.writes = []
+        self.fail_before_write = {}
         self.lose_reply_after = None
         self.offline = False
 
@@ -59,6 +60,9 @@ class FakeKeitaro:
 
         if request.method != "POST":
             raise AssertionError(f"Unexpected remote write: {request.method} {path}")
+        failure = self.fail_before_write.pop(len(self.writes) + 1, None)
+        if failure is not None:
+            raise failure
         body = json.loads(request.content)
         self.writes.append((path, body))
         if path == "/campaigns":
@@ -179,6 +183,27 @@ class CreatorTests(unittest.TestCase):
         self.assertGreaterEqual(failed.status_code, 400, failed.text)
         self.assertEqual(len(self.stand.writes), after)
         self.stand.offline = False
+
+    def test_retry_each_unsent_post_on_next_submission(self):
+        self.stand.fail_before_write = {
+            1: httpx.ConnectError("Could not connect"),
+            2: httpx.ConnectTimeout("Connection timed out"),
+            3: httpx.PoolTimeout("Connection pool busy"),
+        }
+        for succeeded, expected_status in enumerate([502, 504, 504]):
+            with self.subTest(completed_posts=succeeded):
+                response = self.submit()
+                self.assertEqual(response.status_code, expected_status, response.text)
+                self.assertEqual(len(self.stand.writes), succeeded)
+        self.assert_created(self.submit())
+        self.assert_created(self.submit())
+        self.assertEqual([path for path, _ in self.stand.writes], ["/campaigns", "/streams", "/streams"])
+
+    def test_stream_write_timeout_does_not_authorize_another_post(self):
+        self.stand.fail_before_write[2] = httpx.WriteTimeout("Unknown delivery outcome")
+        self.assertEqual(self.submit().status_code, 504)
+        self.assertEqual(self.submit().status_code, 409)
+        self.assertEqual(len(self.stand.writes), 1)
 
     def test_recover_committed_campaign_after_lost_response(self):
         self.lose_reply_and_restore_connection(1)

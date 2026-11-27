@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Потоки кампаний · Keitaro</title>
+  <link rel="stylesheet" href="/static/create.css">
+  <link rel="stylesheet" href="/static/import.css">
+  <script src="/static/import.js" defer></script>
+</head>
+<body>
+  <header class="bar">
+    <div class="bar-inner">
+      <div class="brand"><strong>Keitaro</strong><span>Кампании</span></div>
+      <nav aria-label="Навигация"><a href="/">Новая кампания</a> · <a href="/docs">Документация API</a></nav>
+    </div>
+  </header>
+  <main>
+    <h1>Потоки кампаний</h1>
+    <section class="panel" aria-labelledby="selector-title">
+      <h2 id="selector-title">Импорт из Keitaro</h2>
+      <label for="campaign">Кампания</label>
+      <select id="campaign" disabled><option value="">Выберите кампанию</option></select>
+      <div class="pagination">
+        <button class="secondary" id="previous" type="button" disabled>Назад</button>
+        <span id="page" class="hint"></span>
+        <button class="secondary" id="next" type="button" disabled>Далее</button>
+      </div>
+      <p id="catalog-status" class="hint" role="status"></p>
+      <button class="secondary" id="retry" type="button" hidden>Повторить загрузку списка</button>
+      <div class="actions">
+        <button id="fetch" type="button" disabled>Fetch streams from KT</button>
+        <a id="admin-link" target="_blank" rel="noopener noreferrer" hidden>View in KT ↗</a>
+      </div>
+      <p id="status" role="status" aria-live="polite" aria-atomic="true"></p>
+      <noscript>Для выбора кампании и загрузки потоков включите JavaScript.</noscript>
+    </section>
+    <section class="panel" id="snapshot" aria-labelledby="snapshot-title" hidden>
+      <h2 id="snapshot-title"></h2>
+      <div id="streams"></div>
+    </section>
+  </main>
+</body>
+</html>

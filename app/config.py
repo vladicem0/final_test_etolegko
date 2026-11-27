@@ -17,3 +17,7 @@ class Settings(DatabaseSettings):
     keitaro_domain_id: int = Field(default=1813, gt=0)
     keitaro_group_id: int = Field(default=10332, gt=0)
     keitaro_traffic_source_id: int = Field(default=836, gt=0)
+
+    def campaign_admin_url(self, campaign_id: int) -> str:
+        host = str(self.keitaro_base_url).split("/admin_api/", 1)[0].rstrip("/")
+        return f"{host}/admin/#!/campaign.editor/{campaign_id}"

@@ -1,0 +1,14 @@
+.panel { padding: clamp(20px, 3vw, 32px); border: 1px solid #d8e0da; border-radius: 12px; background: #fff; }
+.panel + .panel { margin-top: 20px; }
+.panel h2, .stream { overflow-wrap: anywhere; }
+.pagination, .panel .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.pagination { margin-top: 12px; }
+.pagination .hint { margin: 0; }
+#catalog-status[data-error="true"] { color: #972d1d; }
+#retry { margin-top: 10px; }
+.stream { margin-top: 20px; border-top: 1px solid #d8e0da; padding-top: 14px; }
+.stream h3 { font-size: 16px; margin: 0; }
+.stream table { width: 100%; margin-top: 8px; border-collapse: collapse; text-align: left; }
+.stream th, .stream td { border-bottom: 1px solid #e3e9e5; padding: 8px 4px; }
+.stream th { color: #495a51; font-size: 14px; }
+.stream tr.archived { color: #606767; background: #f3f4f3; }
