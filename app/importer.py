@@ -148,9 +148,10 @@ def _update_bindings(db: Session, stream: RemoteStream, previous: dict[int, Stre
             binding = StreamOffer(stream_id=stream.id, offer_id=published.offer_id)
             db.add(binding)
             changed = True
-        elif (binding.position, binding.share, binding.state, binding.removed) != (
-            position, published.share, published.state, False,
-        ):
+        elif binding.share != published.share or binding.state != published.state:
+            binding.pinned = False
+            changed = True
+        elif binding.position != position or binding.removed:
             changed = True
         binding.position = position
         binding.share = published.share

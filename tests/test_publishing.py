@@ -236,6 +236,45 @@ class PublishingTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/campaigns/41/fetch", json={}).status_code, 200)
         self.assertTrue(self.local(712)["offers"][0]["pinned"])
 
+    def publish_two_pins(self):
+        self.edit("add", 18003)
+        self.edit("pin", 18001)
+        self.edit("pin", 18003)
+        return self.accepted()
+
+    def check_external_change_unpins_one_binding(self, **change):
+        before = self.publish_two_pins()
+        self.edit("pin", 18001, sid=712)
+        self.assertEqual(self.push(sid=712).status_code, 200)
+        neighbor = self.local(712)
+        target = next(offer for offer in self.stand.flow["offers"] if offer["offer_id"] == 18001)
+        target.update(change)
+
+        response = self.client.post("/api/campaigns/41/fetch", json={})
+        self.assertEqual(response.status_code, 200, response.text)
+        expected = [dict(offer, **change, pinned=False) if offer["offer_id"] == 18001 else offer
+                    for offer in before["offers"]]
+        self.assertEqual(self.local()["offers"], expected)
+        self.assertTrue(next(o["pinned"] for o in expected if o["offer_id"] == 18003))
+        self.assertTrue(neighbor["offers"][0]["pinned"])
+        self.assertEqual(self.local(712), neighbor)
+
+    def test_fetch_clears_only_the_pin_with_an_external_share_change(self):
+        self.check_external_change_unpins_one_binding(share=37)
+
+    def test_fetch_clears_only_the_pin_with_an_external_state_change(self):
+        self.check_external_change_unpins_one_binding(state="disabled")
+
+    def test_fetch_preserves_pins_across_reordering_and_identical_refetch(self):
+        before = self.publish_two_pins()
+        self.stand.flow["offers"].reverse()
+        response = self.client.post("/api/campaigns/41/fetch", json={})
+        self.assertEqual(response.status_code, 200, response.text)
+        reordered = self.local()
+        self.assertEqual(reordered["offers"], before["offers"][::-1])
+        self.assertEqual(self.client.post("/api/campaigns/41/fetch", json={}).status_code, 200)
+        self.assertEqual(self.local(), reordered)
+
     def test_sparse_shares_and_restore_of_archived_offer(self):
         self.edit("remove", 18002)
         removed = self.accepted()
