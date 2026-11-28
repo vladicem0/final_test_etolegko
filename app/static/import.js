@@ -28,7 +28,8 @@ function updateControls() {
   previous.disabled = busy || offset === 0;
   next.disabled = busy || !hasNext;
   retry.disabled = busy;
-  fetchButton.disabled = busy || !campaign.value;
+  const pending = currentSnapshot?.streams.some(stream => stream.push_pending);
+  fetchButton.disabled = busy || !campaign.value || !!pending;
 }
 
 function showStatus(element, message, error = false) {
@@ -144,13 +145,21 @@ function renderStream(stream) {
   const heading = document.createElement("div");
   heading.className = "stream-heading";
   heading.append(textElement("h3", stream.position + ". " + stream.name));
-  if (stream.has_draft) {
+  const editable = stream.editable && !stream.push_pending;
+  if (stream.push_pending) {
+    heading.append(textElement("p", "Перед редактированием или Fetch сверьте результат публикации."),
+      actionButton("Сверить с Keitaro", () => publishStream(stream)));
+  } else if (stream.has_draft) {
     const indicator = textElement("p", "Есть неопубликованные изменения");
     indicator.className = "dirty";
-    heading.append(indicator, actionButton("Cancel", () => editStream(stream, {action: "cancel"})));
+    heading.append(indicator);
+    if (editable) {
+      heading.append(actionButton("Push to KT", () => publishStream(stream)),
+        actionButton("Cancel", () => editStream(stream, {action: "cancel"})));
+    }
   }
   section.append(heading);
-  if (stream.editable) section.append(offerSearch(stream));
+  if (editable) section.append(offerSearch(stream));
   if (!stream.offers.length) {
     section.append(textElement("p", "Офферов нет."));
     return section;
@@ -159,7 +168,7 @@ function renderStream(stream) {
   const table = document.createElement("table");
   const header = table.createTHead().insertRow();
   const columns = ["Оффер", "Доля", "Состояние"];
-  if (stream.editable) columns.push("Действия");
+  if (editable) columns.push("Действия");
   for (const title of columns) {
     const cell = textElement("th", title);
     cell.scope = "col";
@@ -172,7 +181,7 @@ function renderStream(stream) {
     row.insertCell().textContent = offer.name ? offer.name + " (#" + offer.offer_id + ")" : "#" + offer.offer_id;
     row.insertCell().textContent = offer.share + "%" + (offer.pinned ? " · закреплена" : "");
     row.insertCell().textContent = offer.removed ? "В локальном архиве" : offer.state;
-    if (stream.editable) row.insertCell().append(offerActions(stream, offer));
+    if (editable) row.insertCell().append(offerActions(stream, offer));
   }
   const scroll = document.createElement("div");
   scroll.className = "table-scroll";
@@ -183,6 +192,7 @@ function renderStream(stream) {
 
 function renderSnapshot(data) {
   currentSnapshot = data;
+  updateControls();
   document.getElementById("snapshot-title").textContent = data.name;
   streams.replaceChildren(...data.streams.map(renderStream));
   if (!data.streams.length) streams.append(textElement("p", "В кампании нет потоков."));
@@ -268,7 +278,7 @@ async function openSavedSnapshot() {
   }
 }
 
-async function postChange(path, fields, progress, done) {
+async function postChange(path, fields, progress, done, refreshOnError = false) {
   if (!campaign.value || loadingPage || importing) return;
   localRead?.abort();
   importing = true;
@@ -279,26 +289,27 @@ async function postChange(path, fields, progress, done) {
     const response = await fetch(campaignUrl + path, {
       method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(fields),
     });
-    const result = await response.json();
+    if (response.status === 409) refreshOnError = true;
     if (!response.ok) {
-      let reason = typeof result.detail === "string" ? result.detail : "HTTP " + response.status;
-      if (response.status === 409) {
-        // Another tab may have created or changed a draft since this screen was loaded.
-        try {
-          const local = await fetch(campaignUrl + "/streams");
-          if (local.ok) renderSnapshot(await local.json());
-          else if (local.status === 404) clearSnapshot();
-          else throw new Error("HTTP " + local.status);
-        } catch (error) {
-          reason += " Не удалось перечитать локальный снимок. " + error.message;
-        }
-      }
-      throw new Error(reason);
+      const error = await response.json().catch(() => null);
+      throw new Error(typeof error?.detail === "string" ? error.detail : "HTTP " + response.status);
     }
-    renderSnapshot(result);
+    renderSnapshot(await response.json());
     showStatus(statusMessage, done);
   } catch (error) {
-    showStatus(statusMessage, error.message, true);
+    let reason = error.message;
+    if (refreshOnError) {
+      // Read the local outcome even when the upstream response or the browser connection was lost.
+      try {
+        const local = await fetch(campaignUrl + "/streams");
+        if (local.ok) renderSnapshot(await local.json());
+        else if (local.status === 404) clearSnapshot();
+        else throw new Error("HTTP " + local.status);
+      } catch (readError) {
+        reason += " Не удалось перечитать локальный снимок. Обновите страницу. " + readError.message;
+      }
+    }
+    showStatus(statusMessage, reason, true);
   } finally {
     importing = false;
     updateControls();
@@ -309,6 +320,12 @@ function editStream(stream, fields) {
   const done = fields.action === "cancel" ? "Черновик потока отменён." : "Изменения сохранены локально.";
   return postChange("/streams/" + stream.id + "/draft", {...fields, expected_revision: stream.revision},
     "Сохраняем изменения потока…", done);
+}
+
+function publishStream(stream) {
+  const progress = stream.push_pending ? "Сверяем результат публикации…" : "Публикуем поток в Keitaro…";
+  return postChange("/streams/" + stream.id + "/push", {expected_revision: stream.revision},
+    progress, "Состав потока подтверждён в Keitaro.", true);
 }
 
 function submitFetch(fields) {

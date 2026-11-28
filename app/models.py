@@ -36,6 +36,7 @@ class Stream(Base):
     schema: Mapped[str] = mapped_column(String(32))
     present: Mapped[bool]
     edit_revision: Mapped[int] = mapped_column(server_default=text("0"))
+    push_pending: Mapped[bool] = mapped_column(server_default=false())
     draft_base: Mapped[list[dict] | None] = mapped_column(JSON(none_as_null=True))
     draft_add_origin: Mapped[list[list[int]] | None] = mapped_column(JSON(none_as_null=True))
 
