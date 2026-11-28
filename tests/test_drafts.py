@@ -176,10 +176,25 @@ class DraftTests(unittest.TestCase):
                          [(18001, 0, True), (18002, 0, True), (18003, 0, True)])
         self.assertEqual(self.edit("cancel")["offers"], published["offers"])
 
-    def test_pin_at_current_share_rebalances_other_active_offers(self):
+    def test_pin_at_current_share_preserves_weights_without_a_draft(self):
+        previous = stream(self.initial)
         pinned = self.edit("pin", 18001)
+        self.assertFalse(pinned["has_draft"])
+        self.assertGreater(pinned["revision"], previous["revision"])
         self.assertTrue(pinned["offers"][0]["pinned"])
-        self.assertEqual(active_shares(pinned), [(18001, 12), (18002, 44), (18003, 44)])
+        self.assertEqual(active_shares(pinned), [(18001, 12), (18002, 18), (18003, 70)])
+        self.assertEqual(stream(self.snapshot()), pinned)
+        stale = self.post_action("remove", 18003, revision=previous["revision"])
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(stream(self.snapshot()), pinned)
+        self.assertEqual(self.stand.requests, [])
+
+    def test_pin_with_no_free_offer_for_the_remainder_keeps_snapshot(self):
+        self.remote_offers[:] = [binding(31, 18001, 60)]
+        before = stream(self.fetch())
+        response = self.post_action("pin", 18001)
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(stream(self.snapshot()), before)
 
     def test_pin_unpin_and_disabled_offer(self):
         self.remote_offers[1]["state"] = "disabled"
@@ -193,14 +208,14 @@ class DraftTests(unittest.TestCase):
         self.assertFalse(any(row["pinned"] for row in unpinned["offers"]))
         self.assertEqual(active_shares(self.edit("add", 18004)), [(18001, 33), (18003, 33), (18004, 34)])
 
-    def test_restore_returns_published_binding_to_its_previous_position_unpinned(self):
+    def test_restore_appends_published_binding_unpinned(self):
         self.edit("pin", 18002, share=30)
         removed = self.edit("remove", 18002)
         archived = next(row for row in removed["offers"] if row["offer_id"] == 18002)
         self.assertEqual((archived["removed"], archived["share"]), (True, 0))
         restored = self.edit("restore", 18002)
-        self.assertEqual([offer_id for offer_id, _ in active_shares(restored)], [18001, 18002, 18003])
-        self.assertFalse(restored["offers"][1]["pinned"])
+        self.assertEqual(active_shares(restored), [(18001, 33), (18003, 33), (18002, 34)])
+        self.assertFalse(restored["offers"][-1]["pinned"])
 
     def test_editability_depends_on_schema_and_creator_completion(self):
         self.assertFalse(stream(self.initial, 710)["editable"])
