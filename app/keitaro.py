@@ -129,6 +129,12 @@ class KeitaroClient:
             raise CatalogError("Keitaro returned a stream with a mismatched campaign ID.")
         return streams
 
+    async def get_stream(self, stream_id: int) -> dict:
+        return await self._request("GET", f"streams/{stream_id}", _record)
+
+    async def put_stream_offers(self, stream_id: int, offers: list[dict]) -> dict:
+        return await self._request("PUT", f"streams/{stream_id}", _record, payload={"offers": offers})
+
     async def create_campaign(self, payload: dict) -> dict:
         return await self._request("POST", "campaigns", _record, payload=payload)
 

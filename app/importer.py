@@ -77,6 +77,7 @@ def _snapshot(db: Session, campaign_id: int) -> dict:
                 "type": stream.type, "schema": stream.schema, "offers": [],
                 "editable": stream.schema == "landings" and campaign.creation_state in ("ready", "imported"),
                 "has_draft": stream.draft_base is not None, "revision": stream.edit_revision,
+                "push_pending": stream.push_pending,
             }
         if binding is not None:
             streams[stream.id]["offers"].append({
@@ -136,16 +137,21 @@ def _update_offers(db: Session, offer_ids: set[int], names: dict[int, str]) -> N
 
 
 def _update_bindings(db: Session, stream: RemoteStream, previous: dict[int, StreamOffer]) -> bool:
+    # Published rows may have gaps occupied by local archive entries.
+    live = sorted((row for row in previous.values() if not row.removed), key=lambda r: (r.position, r.offer_id))
+    keep_positions = [row.offer_id for row in live] == [offer.offer_id for offer in stream.offers]
     changed = False
-    for position, published in enumerate(stream.offers):
+    for index, published in enumerate(stream.offers):
+        position = live[index].position if keep_positions else index
         binding = previous.pop(published.offer_id, None)
         if binding is None:
             binding = StreamOffer(stream_id=stream.id, offer_id=published.offer_id)
             db.add(binding)
             changed = True
-        elif (binding.position, binding.share, binding.state, binding.removed) != (
-            position, published.share, published.state, False,
-        ):
+        elif binding.share != published.share or binding.state != published.state:
+            binding.pinned = False
+            changed = True
+        elif binding.position != position or binding.removed:
             changed = True
         binding.position = position
         binding.share = published.share
@@ -162,10 +168,13 @@ def _update_bindings(db: Session, stream: RemoteStream, previous: dict[int, Stre
 
 def _check_discard(db: Session, campaign_id: int, confirmed: dict[int, int] | None) -> None:
     # Consent applies to exactly the drafts and revisions the operator saw.
-    drafts = dict(db.execute(
-        select(Stream.id, Stream.edit_revision).join(Campaign)
+    rows = db.execute(
+        select(Stream.id, Stream.edit_revision, Stream.push_pending).join(Campaign)
         .where(Campaign.keitaro_id == campaign_id, Stream.draft_base.is_not(None))
-    ).tuples().all())
+    ).all()
+    if any(row.push_pending for row in rows):
+        raise HTTPException(409, "Сначала сверьте результат публикации потока с Keitaro.")
+    drafts = {row.id: row.edit_revision for row in rows}
     if drafts != (confirmed or {}):
         raise HTTPException(409, "Состав черновиков изменился или их сброс не подтверждён. "
                                  "Откройте сохранённые потоки и выберите, оставить ли правки.")

@@ -135,6 +135,8 @@ def edit_draft(
         if found is None:
             raise HTTPException(404, "Поток не найден в сохранённой кампании.")
         stream, creation_state = found
+        if stream.push_pending:
+            raise HTTPException(409, "Сначала сверьте результат публикации этого потока с Keitaro.")
         if stream.edit_revision != expected_revision:
             raise HTTPException(409, "Поток уже изменился. Откройте актуальный снимок и повторите действие.")
         if creation_state not in ("ready", "imported") or stream.schema != "landings":

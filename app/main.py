@@ -18,6 +18,7 @@ from app.drafts import edit_draft
 from app.importer import fetch_campaign, local_campaign
 from app.keitaro import CatalogError, CatalogItem, KeitaroClient
 from app.models import Campaign
+from app.publishing import publish_stream
 
 
 @asynccontextmanager
@@ -166,5 +167,20 @@ async def update_draft(
         edit_draft, engine, campaign_id, stream_id, action=fields.action, offer_id=fields.offer_id,
         expected_revision=fields.expected_revision, share=fields.share, catalog_item=catalog_item,
     )
+    snapshot = await run_in_threadpool(local_campaign, engine, campaign_id)
+    return {**snapshot, "admin_url": request.app.state.settings.campaign_admin_url(campaign_id)}
+
+
+class PushInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_revision: Revision
+
+
+@app.post("/api/campaigns/{campaign_id}/streams/{stream_id}/push", dependencies=[Depends(require_local_write)])
+async def push_stream(
+    request: Request, campaign_id: CampaignId, stream_id: CampaignId, fields: PushInput, client: Client,
+) -> dict:
+    engine = request.app.state.engine
+    await publish_stream(client, engine, campaign_id, stream_id, fields.expected_revision)
     snapshot = await run_in_threadpool(local_campaign, engine, campaign_id)
     return {**snapshot, "admin_url": request.app.state.settings.campaign_admin_url(campaign_id)}
