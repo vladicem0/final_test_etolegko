@@ -16,8 +16,8 @@ from alembic.config import Config
 from fastapi.testclient import TestClient
 
 from app.main import app
-from tests.test_drafts import stream
-from tests.test_importer import ImportStand
+from tests.test_drafts import active_shares, stream
+from tests.test_importer import ImportStand, binding
 
 
 class PublishStand(ImportStand):
@@ -35,7 +35,7 @@ class PublishStand(ImportStand):
         if request.method != "PUT":
             return super().__call__(request)
         path = request.url.path.removeprefix("/admin_api/v1")
-        if path != "/streams/711":
+        if path != f"/streams/{self.flow['id']}":
             raise AssertionError(f"Unexpected PUT to {path}")
         body = json.loads(request.content)
         self.requests.append(("PUT", path, {}))
@@ -123,7 +123,7 @@ class PublishingTests(unittest.TestCase):
         self.assertEqual(self.push(revision=draft["revision"]).status_code, 409)
         self.assertEqual(len(self.stand.published), 1)
 
-    def test_fetch_preserves_archive_slots_after_push_and_accepts_remote_reordering(self):
+    def test_fetch_after_push_is_idempotent_and_accepts_remote_reordering(self):
         self.edit("add", 18003)
         self.edit("remove", 18002)
         self.edit("remove", 18001)
@@ -135,12 +135,61 @@ class PublishingTests(unittest.TestCase):
 
         self.edit("restore", 18001)
         restored = self.edit("restore", 18002)
-        self.assertEqual([row["offer_id"] for row in restored["offers"]], [18002, 18001, 18003])
+        self.assertEqual([row["offer_id"] for row in restored["offers"]], [18003, 18001, 18002])
         self.accepted()
         self.stand.flow["offers"].reverse()
         reordered = self.client.post("/api/campaigns/41/fetch", json={})
         self.assertEqual(reordered.status_code, 200, reordered.text)
-        self.assertEqual([row["offer_id"] for row in stream(reordered.json())["offers"]], [18003, 18001, 18002])
+        self.assertEqual([row["offer_id"] for row in stream(reordered.json())["offers"]], [18002, 18001, 18003])
+
+    def test_video_fetch_pin_current_share_restore_and_push(self):
+        offer_ids = [3749, 11111, 11112, 3717]
+        self.stand.offers.extend({"id": oid, "name": f"Offer {oid}"} for oid in offer_ids)
+        flow = dict(self.stand.flow, id=713, position=4,
+                    offers=[binding(i, oid, 25) for i, oid in enumerate(offer_ids, 1)])
+        self.stand.streams[41].append(flow)
+        self.stand.flow = flow
+        fetched = self.client.post("/api/campaigns/41/fetch", json={})
+        self.assertEqual(fetched.status_code, 200, fetched.text)
+        self.assertEqual(active_shares(stream(fetched.json(), 713)), [(oid, 25) for oid in offer_ids])
+
+        # The operator removes the first two offers in Keitaro itself.
+        flow["offers"] = flow["offers"][2:]
+        fetched = self.client.post("/api/campaigns/41/fetch", json={})
+        self.assertEqual(fetched.status_code, 200, fetched.text)
+        before = stream(fetched.json(), 713)
+        self.assertEqual(active_shares(before), [(11112, 25), (3717, 25)])
+        self.assertEqual({o["offer_id"]: o["share"] for o in before["offers"] if o["removed"]},
+                         {3749: 0, 11111: 0})
+        self.stand.requests.clear()
+
+        pinned = self.edit("pin", 3717, sid=713, share=25)
+        self.assertFalse(pinned["has_draft"])
+        self.assertEqual(active_shares(pinned), [(11112, 25), (3717, 25)])
+        self.assertEqual([o["offer_id"] for o in pinned["offers"] if o["pinned"]], [3717])
+        self.server.close()
+        self.start_app()
+        self.assertEqual(self.local(713), pinned)
+
+        restored = self.edit("restore", 3749, sid=713)
+        expected = [(11112, 37), (3717, 25), (3749, 38)]
+        self.assertTrue(restored["has_draft"])
+        self.assertEqual(active_shares(restored), expected)
+        self.assertEqual([o["offer_id"] for o in restored["offers"] if o["pinned"]], [3717])
+        self.assertEqual([(o["offer_id"], o["share"]) for o in restored["offers"] if o["removed"]], [(11111, 0)])
+        self.assertEqual(self.stand.requests, [])
+
+        reply = self.push(sid=713)
+        self.assertEqual(reply.status_code, 200, reply.text)
+        self.assertEqual(self.stand.requests, [
+            ("GET", "/streams/713", {}), ("PUT", "/streams/713", {}), ("GET", "/streams/713", {}),
+        ])
+        self.assertEqual(self.stand.published, [{"offers": [
+            {"offer_id": oid, "share": share, "state": "active"} for oid, share in expected
+        ]}])
+        confirmed = self.local(713)
+        self.assertFalse(confirmed["has_draft"])
+        self.assertEqual(confirmed["offers"], restored["offers"])
 
     def test_preflight_detects_changes_to_order_membership_weight_and_state(self):
         original = deepcopy(self.stand.flow["offers"])
@@ -224,17 +273,19 @@ class PublishingTests(unittest.TestCase):
         self.accepted()
         self.assertEqual(len(self.stand.published), 2)
 
-    def test_pin_only_commit_reads_remote_and_survives_fetch_without_put(self):
+    def test_unpin_only_commit_reads_remote_and_survives_fetch_without_put(self):
         self.edit("pin", 18001, sid=712)
-        self.stand.requests.clear()
+        draft = self.edit("unpin", 18001, sid=712)
+        self.assertTrue(draft["has_draft"])
+        self.assertEqual(self.stand.requests, [])
         reply = self.push(sid=712)
         self.assertEqual(reply.status_code, 200, reply.text)
         flow = stream(reply.json(), 712)
         self.assertFalse(flow["has_draft"])
-        self.assertTrue(flow["offers"][0]["pinned"])
+        self.assertFalse(flow["offers"][0]["pinned"])
         self.assertEqual(self.stand.requests, [("GET", "/streams/712", {})])
         self.assertEqual(self.client.post("/api/campaigns/41/fetch", json={}).status_code, 200)
-        self.assertTrue(self.local(712)["offers"][0]["pinned"])
+        self.assertFalse(self.local(712)["offers"][0]["pinned"])
 
     def publish_two_pins(self):
         self.edit("add", 18003)
@@ -244,9 +295,8 @@ class PublishingTests(unittest.TestCase):
 
     def check_external_change_unpins_one_binding(self, **change):
         before = self.publish_two_pins()
-        self.edit("pin", 18001, sid=712)
-        self.assertEqual(self.push(sid=712).status_code, 200)
-        neighbor = self.local(712)
+        neighbor = self.edit("pin", 18001, sid=712)
+        self.assertFalse(neighbor["has_draft"])
         target = next(offer for offer in self.stand.flow["offers"] if offer["offer_id"] == 18001)
         target.update(change)
 
@@ -285,7 +335,7 @@ class PublishingTests(unittest.TestCase):
         self.edit("restore", 18002)
         restored = self.accepted()
         self.assertEqual(self.stand.published[-1], {"offers": [
-            {"offer_id": 18002, "share": 50, "state": "active"}, {"offer_id": 18001, "share": 50, "state": "active"},
+            {"offer_id": 18001, "share": 50, "state": "active"}, {"offer_id": 18002, "share": 50, "state": "active"},
         ]})
         self.assertFalse(any(row["removed"] for row in restored["offers"]))
 

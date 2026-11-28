@@ -22,14 +22,13 @@ class Binding:
 
 
 def _bindings(db: Session, model: type[StreamOffer] | type[StreamOfferDraft], stream_id: int) -> list[Binding]:
-    # A former occupant of a position precedes the live row which took its place.
     records = db.scalars(select(model).where(model.stream_id == stream_id).order_by(
         model.position, model.removed.desc(), model.offer_id,
     ))
     return [Binding(r.offer_id, r.share, r.state, r.removed, r.pinned) for r in records]
 
 
-def _distribute(rows: list[Binding]) -> None:
+def _distribute(rows: list[Binding], *, keep_shares: bool = False) -> None:
     active = [r for r in rows if not r.removed and r.state == "active"]
     if not active:
         raise HTTPException(409, "В потоке должен остаться хотя бы один активный оффер.")
@@ -38,7 +37,7 @@ def _distribute(rows: list[Binding]) -> None:
     remaining = 100 - sum(r.share for r in pinned)
     if any(r.share <= 0 for r in pinned) or remaining < len(free) or (not free and remaining != 0):
         raise HTTPException(409, "Невозможно распределить 100%. Измените или снимите закрепление доли.")
-    if free:
+    if free and not keep_shares:
         each, extra = divmod(remaining, len(free))
         for index, row in enumerate(free):
             row.share = each + (index >= len(free) - extra)
@@ -74,7 +73,9 @@ def clear_drafts(db: Session, stream_ids: Iterable[int]) -> None:
 def _edit_rows(
     rows: list[Binding], published: list[Binding], stream: Stream, action: str, offer_id: int,
     share: int | None,
-) -> None:
+) -> bool:
+    """Apply the edit and report whether it only pinned the current share."""
+    pinned_current_share = False
     row = next((r for r in rows if r.offer_id == offer_id), None)
     if action == "add":
         if row is not None:
@@ -97,17 +98,20 @@ def _edit_rows(
                         if not restored.removed and restored.state == "active":
                             restored.share = original_share
                     stream.draft_add_origin = None
-                    return
+                    return False
             if row.state == "disabled":
                 # Archiving a disabled binding leaves the active allocation and its undo data intact.
-                return
+                return False
         elif action == "restore" and row.removed:
+            rows.remove(row)
             row.removed, row.pinned, row.state = False, False, "active"
+            rows.append(row)
         elif action in ("pin", "unpin") and row.state == "active" and not row.removed:
             if action == "pin":
                 value = row.share if share is None else share
                 if type(value) is not int or not 1 <= value <= 100:
                     raise HTTPException(422, "Закреплённая доля должна быть целым числом от 1 до 100.")
+                pinned_current_share = value == row.share
                 row.share, row.pinned = value, True
             else:
                 if not row.pinned:
@@ -119,8 +123,9 @@ def _edit_rows(
         if stream.draft_add_origin is not None and any(item[0] == offer_id for item in stream.draft_add_origin):
             stream.draft_add_origin = None
         if action == "unpin":
-            return
-    _distribute(rows)
+            return False
+    _distribute(rows, keep_shares=pinned_current_share)
+    return pinned_current_share
 
 
 def edit_draft(
@@ -129,17 +134,17 @@ def edit_draft(
 ) -> None:
     with Session(engine) as db, db.begin():
         db.connection().exec_driver_sql("BEGIN IMMEDIATE")
-        found = db.execute(select(Stream, Campaign.creation_state).join(Campaign).where(
+        found = db.execute(select(Stream, Campaign).join(Campaign).where(
             Campaign.keitaro_id == campaign_id, Stream.id == stream_id, Stream.present.is_(True),
         )).one_or_none()
         if found is None:
             raise HTTPException(404, "Поток не найден в сохранённой кампании.")
-        stream, creation_state = found
+        stream, campaign = found
         if stream.push_pending:
             raise HTTPException(409, "Сначала сверьте результат публикации этого потока с Keitaro.")
         if stream.edit_revision != expected_revision:
             raise HTTPException(409, "Поток уже изменился. Откройте актуальный снимок и повторите действие.")
-        if creation_state not in ("ready", "imported") or stream.schema != "landings":
+        if campaign.creation_state not in ("ready", "imported") or stream.schema != "landings":
             raise HTTPException(409, "Редактирование доступно для потоков офферов готовой кампании.")
         if action == "cancel":
             clear_drafts(db, [stream_id])
@@ -152,9 +157,17 @@ def edit_draft(
             rows = [Binding(r.offer_id, r.share, r.state, r.removed, r.pinned) for r in published]
         else:
             rows = _bindings(db, StreamOfferDraft, stream_id)
-        _edit_rows(rows, published, stream, action, offer_id, share)
+        pinned_current_share = _edit_rows(rows, published, stream, action, offer_id, share)
         if rows == published:
             clear_drafts(db, [stream_id])
+            return
+        if pinned_current_share and stream.draft_base is None:
+            # A standalone pin is local metadata. Invalidate stale editors and in-flight Fetch calls.
+            db.execute(update(StreamOffer).where(
+                StreamOffer.stream_id == stream_id, StreamOffer.offer_id == offer_id,
+            ).values(pinned=True))
+            stream.edit_revision += 1
+            campaign.snapshot_revision += 1
             return
         if action == "add":
             if catalog_item is None or catalog_item.id != offer_id or not catalog_item.name.strip():
